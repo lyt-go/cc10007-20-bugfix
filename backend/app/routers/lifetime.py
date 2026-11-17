@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas import ActionResult, EntryPayload, PageResult
+from app.services.allocation import allocation_service
 from app.services.lifetime import LifetimeService
 
 router = APIRouter(prefix="/api/lifetime", tags=["LTV估算"])
@@ -27,16 +28,46 @@ def list_entries(
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
     items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
-    return PageResult(items=items, total=total, page=page, size=size)
+    usages = allocation_service.model_usage_map([str(row.get("模型编号")) for row in items])
+    enriched = [{**row, "预算引用": usages.get(str(row.get("模型编号")), [])} for row in items]
+    return PageResult(items=enriched, total=total, page=page, size=size)
+
+
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出LTV估算清单：返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "lifetime", "total": total, "items": items}
+
+
+@router.get("/pending", response_model=PageResult[dict])
+def list_pending() -> PageResult[dict]:
+    """LTV估算待处理明细：渠道预算分配明细数据集投递后的复核队列。"""
+    items = allocation_service.pending_items()
+    return PageResult(items=items, total=len(items), page=1, size=len(items) or 20)
+
+
+@router.post("/pending/{pending_id}/archive", response_model=ActionResult)
+def archive_pending(pending_id: str) -> ActionResult:
+    """来源失效的待处理方案停止批准并归档，保留原渠道额度与ROI偏差作为历史。"""
+    item, message = allocation_service.archive_pending(pending_id)
+    if item is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=item)
 
 
 @router.get("/{entry_id}", response_model=dict)
-def get_entry(entry_id: int) -> dict:
+def get_entry(entry_id: str) -> dict:
     """读取单条LTV模型明细；不存在时给出可读的错误说明。"""
-    entry = service.get_entry(entry_id)
+    entry = allocation_service.get_model_by_id(entry_id)
     if entry is None:
         raise HTTPException(status_code=404, detail=f"LTV模型 {entry_id} 不存在或已归档")
-    return entry
+    payload = dict(entry)
+    impact = allocation_service.model_impact(entry_id) or {}
+    payload["用户价值记录"] = impact.get("价值记录") or []
+    payload["预算引用"] = impact.get("预算方案") or []
+    payload["待处理明细"] = impact.get("待处理明细") or []
+    return payload
 
 
 @router.post("", response_model=ActionResult)
@@ -49,17 +80,20 @@ def create_entry(payload: EntryPayload) -> ActionResult:
 
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
-def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
-    """对单条LTV模型执行提交模型校验、启用模型、废弃模型；不允许的动作会被拦下并说明原因。"""
+def run_action(entry_id: str, payload: EntryPayload) -> ActionResult:
+    """对单条LTV模型执行提交模型校验、启用模型、废弃模型；状态会同步到渠道额度。"""
     action = str(payload.values.get("action") or "").strip()
-    entry, message = service.run_action(entry_id, action)
+    model = allocation_service.get_model_by_id(entry_id)
+    if model is None:
+        return ActionResult(ok=False, message=f"LTV模型 {entry_id} 不存在或已归档")
+    entry, message = service.run_action(int(model["id"]), action)
     if entry is None:
         return ActionResult(ok=False, message=message)
+    changed = allocation_service.on_model_state_changed(
+        str(entry.get("模型编号")),
+        str(entry.get("status")),
+        action=action,
+    )
+    if changed:
+        message += "；已同批落定渠道额度：" + "、".join(str(plan.get("方案编号")) for plan in changed)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出LTV估算清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "lifetime", "total": total, "items": items}

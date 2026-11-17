@@ -4,8 +4,10 @@
 """
 from __future__ import annotations
 
+import threading
 from typing import Any
 
+from app.domain_seed import AUX_MODULES, apply_domain_seed
 from app.seed import SEED_ROWS
 
 
@@ -14,6 +16,10 @@ class Store:
         self._tables: dict[str, list[dict[str, Any]]] = {
             name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
         }
+        apply_domain_seed(self._tables)
+        # 同一业务记录只允许一个请求推进状态：预算批准、LTV废弃、数据集投递
+        # 都要在这把锁里完成“校验+写入”，避免并发下产生两个处理终点。
+        self.lock = threading.RLock()
 
     def module_names(self) -> list[str]:
         return sorted(self._tables)
@@ -30,6 +36,8 @@ class Store:
     def overview(self) -> dict[str, object]:
         modules: list[dict[str, object]] = []
         for name in self.module_names():
+            if name in AUX_MODULES:
+                continue
             rows = self.rows(name)
             modules.append({
                 "name": name,

@@ -75,5 +75,40 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+## 预算分配与LTV估算的联动
+
+预算分配与LTV估算的跨模块规则收在 `backend/app/services/allocation.py`，示例数据补在
+`backend/app/domain_seed.py`。关键口径：
+
+- **价值来源只看“已启用”模型**：模型校验中、草稿、已废弃的LTV一律不参与渠道额度重算；
+  `LIFE-0002` 处于模型校验中，遗留数据集 `DSET-0001` 仍为它保留信息流额度，这就是
+  `BUDG-0001`（本轮复核对象）的来源失效断点。
+- **结果版本由业务版本材料确认**：`business_version` 表里的材料确认哪个版本，重算出的
+  渠道预算分配明细数据集就落在哪个业务版本下（`BUDG-0001-BV-2026-11-A-V2`）。
+- **模型状态与渠道额度同批落定**：LTV 废弃/启用会同步改写引用它的渠道额度、方案来源状态
+  和当前数据集来源状态，原渠道额度与ROI偏差保留为历史，可按分配编号复查。
+- **同一业务记录只允许一个处理终点**：批准、冻结、LTV下线回执、文件接收共用一把记录级锁；
+  并发上传只接纳一个来源有效的渠道预算分配明细数据集（其余按幂等或冲突拒绝）。
+- **已批准的历史分配保持原预算时点状态**：批准次数与批准时点不变，后续废弃只把当前额度
+  置零并标记来源失效待复核。
+
+相关接口：
+
+| 接口 | 用途 |
+| --- | --- |
+| `GET /api/budget/{方案}/audit?chain_version=` | 按遗留调用链版本核对断点与检查项 |
+| `POST /api/budget/{方案}/recalculate` | 按模型状态重算渠道额度并生成数据集 |
+| `POST /api/budget/{方案}/datasets` | 接纳上传的渠道预算分配明细数据集 |
+| `POST /api/budget/{方案}/deliver` | 投递到LTV估算待处理明细 |
+| `POST /api/budget/{方案}/package` `/receive` | 打包与文件接收 |
+| `POST /api/budget/{方案}/value-version` | 替换为新价值版本并重算 |
+| `GET /api/lifetime/pending` | LTV估算待处理明细 |
+
+验收脚本（覆盖校验中参与、废弃残留、重复批准、失败回退）：
+
+```bash
+cd backend && .venv/bin/python -m app.checks
+```
+
 领域：数据工程
 子方向：数据分析与数据应用

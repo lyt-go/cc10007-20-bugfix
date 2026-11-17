@@ -21,7 +21,7 @@ class BudgetService:
         page: int = 1,
         size: int = 20,
     ) -> tuple[list[dict[str, Any]], int]:
-        rows = store.rows(MODULE)
+        rows = sorted(store.rows(MODULE), key=lambda row: int(row.get("id", 0)))
         if keyword:
             rows = [row for row in rows if keyword in str(row.get("方案编号", ""))]
         if status:
@@ -47,6 +47,7 @@ class BudgetService:
         return entry, []
 
     def run_action(self, entry_id: int, action: str) -> tuple[dict[str, Any] | None, str]:
+        """只负责不涉及价值来源的简单流转；批准/冻结/评审由 allocation 服务裁决。"""
         entry = store.find(MODULE, entry_id)
         if entry is None:
             return None, f"预算方案 {entry_id} 不存在或已归档"
